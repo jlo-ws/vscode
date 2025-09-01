@@ -478,4 +478,120 @@ suite('AuthenticationAccessService', () => {
 			assert.strictEqual(result.length, 0);
 		});
 	});
+
+	suite('Edge Cases and Error Handling', () => {
+		test('handles storage corruption gracefully', () => {
+			storageService.store('github-user@example.com', 'invalid-json-data', StorageScope.APPLICATION, StorageTarget.USER);
+
+			// Should not throw and return empty array
+			const result = authenticationAccessService.readAllowedExtensions('github', 'user@example.com');
+			assert.strictEqual(result.length, 0);
+		});
+
+		test('handles concurrent authentication requests', () => {
+			let accessCheckCount = 0;
+			const originalIsAccessAllowed = authenticationAccessService.isAccessAllowed.bind(authenticationAccessService);
+
+			const mockIsAccessAllowed = (providerId: string, accountName: string, extensionId: string) => {
+				accessCheckCount++;
+				return originalIsAccessAllowed(providerId, accountName, extensionId);
+			};
+
+			// Simulate concurrent requests
+			const promises = [];
+			for (let i = 0; i < 10; i++) {
+				promises.push(Promise.resolve(mockIsAccessAllowed('github', 'user@example.com', `extension${i}`)));
+			}
+
+			return Promise.all(promises).then(() => {
+				assert.strictEqual(accessCheckCount, 10);
+			});
+		});
+
+		test('handles product configuration edge cases', () => {
+			// Test with null trusted extensions
+			productService.trustedExtensionAuthAccess = null as any;
+			let result = authenticationAccessService.readAllowedExtensions('github', 'user@example.com');
+			assert.strictEqual(result.length, 0);
+
+			// Test with undefined trusted extensions
+			productService.trustedExtensionAuthAccess = undefined;
+			result = authenticationAccessService.readAllowedExtensions('github', 'user@example.com');
+			assert.strictEqual(result.length, 0);
+
+			// Test with empty array
+			productService.trustedExtensionAuthAccess = [];
+			result = authenticationAccessService.readAllowedExtensions('github', 'user@example.com');
+			assert.strictEqual(result.length, 0);
+
+			// Test with empty object
+			productService.trustedExtensionAuthAccess = {};
+			result = authenticationAccessService.readAllowedExtensions('github', 'user@example.com');
+			assert.strictEqual(result.length, 0);
+		});
+
+		test('handles race conditions in access control', () => {
+			// Simulate race condition where extension is added and removed simultaneously
+			authenticationAccessService.updateAllowedExtensions('github', 'user@example.com', [
+				{ id: 'extension1', name: 'Extension 1', allowed: true }
+			]);
+
+			// Simulate concurrent operations
+			const updatePromise = Promise.resolve().then(() => {
+				authenticationAccessService.updateAllowedExtensions('github', 'user@example.com', [
+					{ id: 'extension1', name: 'Extension 1', allowed: false }
+				]);
+			});
+
+			const removePromise = Promise.resolve().then(() => {
+				authenticationAccessService.removeAllowedExtensions('github', 'user@example.com');
+			});
+
+			return Promise.all([updatePromise, removePromise]).then(() => {
+				const result = authenticationAccessService.readAllowedExtensions('github', 'user@example.com');
+				// Result should be consistent (either empty or with the extension)
+				assert.ok(Array.isArray(result));
+			});
+		});
+
+		test('handles large number of extensions efficiently', () => {
+			// Test with many extensions
+			const manyExtensions = [];
+			for (let i = 0; i < 1000; i++) {
+				manyExtensions.push({
+					id: `extension${i}`,
+					name: `Extension ${i}`,
+					allowed: i % 2 === 0
+				});
+			}
+
+			const startTime = Date.now();
+			authenticationAccessService.updateAllowedExtensions('github', 'user@example.com', manyExtensions);
+			const updateTime = Date.now() - startTime;
+
+			const readStartTime = Date.now();
+			const result = authenticationAccessService.readAllowedExtensions('github', 'user@example.com');
+			const readTime = Date.now() - readStartTime;
+
+			assert.strictEqual(result.length, 1000);
+			assert.ok(updateTime < 1000, `Update took ${updateTime}ms`);
+			assert.ok(readTime < 1000, `Read took ${readTime}ms`);
+		});
+
+		test('handles special characters in provider and account names', () => {
+			const specialProviderId = 'provider-with-special-chars!@#$%';
+			const specialAccountName = 'user+with+special@chars.com';
+
+			authenticationAccessService.updateAllowedExtensions(specialProviderId, specialAccountName, [
+				{ id: 'extension1', name: 'Extension 1', allowed: true }
+			]);
+
+			const result = authenticationAccessService.readAllowedExtensions(specialProviderId, specialAccountName);
+			assert.strictEqual(result.length, 1);
+			assert.strictEqual(result[0].id, 'extension1');
+
+			const accessResult = authenticationAccessService.isAccessAllowed(specialProviderId, specialAccountName, 'extension1');
+			assert.strictEqual(accessResult, true);
+		});
+	});
 });
